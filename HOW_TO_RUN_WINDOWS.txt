@@ -1,0 +1,1043 @@
+const CONFIG = window.SC_CONFIG || {
+  FREE_LEVELS: 0,
+  FREE_TRIAL_DAYS: 3,
+  TOTAL_LEVELS: 1000,
+  TEST_INTERVAL: 20,
+  PASS_MARK_PERCENT: 75,
+  WRONG_ANSWER_XP_PENALTY: 10,
+  STRIPE_PAYMENT_LINK: 'https://buy.stripe.com/test_8x2aEXgPceOs2fpaMr4wM00'
+};
+
+const STORAGE_KEY = 'sc_academy_progress_v9_trial_harder';
+const PAID_KEY = 'sc_paid_access';
+const TRIAL_KEY = 'sc_trial_started_at';
+
+const SKILLS = [
+  { name: 'Python', icon: '🐍', colour: '#2563eb' },
+  { name: 'JavaScript', icon: '⚡', colour: '#f59e0b' },
+  { name: 'C Programming', icon: '🔩', colour: '#64748b' },
+  { name: 'SQL', icon: '🗄️', colour: '#0ea5e9' },
+  { name: 'Power BI / DAX', icon: '📊', colour: '#eab308' },
+  { name: 'HTML / CSS', icon: '🎨', colour: '#ec4899' },
+  { name: 'React', icon: '⚛️', colour: '#06b6d4' },
+  { name: 'Node.js / APIs', icon: '🧠', colour: '#16a34a' },
+  { name: 'Algorithms', icon: '🧩', colour: '#7c3aed' },
+  { name: 'Software Engineering', icon: '🏗️', colour: '#ea580c' }
+];
+
+const LEVEL_THEMES = [
+  'variables and values', 'data types', 'operators', 'conditions', 'loops',
+  'functions', 'arrays and lists', 'objects and dictionaries', 'debugging basics', 'clean code',
+  'DOM and user input', 'forms and validation', 'SQL SELECT', 'SQL filtering', 'joins and relationships',
+  'Power BI measures', 'DAX context', 'React components', 'API requests', 'algorithm thinking',
+  'testing', 'error handling', 'performance', 'security basics', 'deployment', 'architecture',
+  'data modelling', 'automation', 'project planning', 'refactoring'
+];
+
+const state = loadState();
+let visibleChapterStart = chapterStartFor(state.currentLevel || 1);
+let activeLevel = state.currentLevel || 1;
+let mode = 'path';
+let lessonStage = 'lesson';
+let lessonCardIndex = 0;
+let questionIndex = 0;
+let currentQuestions = [];
+let selectedAnswer = null;
+let testResults = [];
+
+function defaultState() {
+  return {
+    unlockedLevel: 1,
+    currentLevel: 1,
+    completedLevels: [],
+    xp: 0,
+    streak: 0,
+    attempts: {},
+    failedTopics: [],
+    testsPassed: []
+  };
+}
+
+function loadState() {
+  try {
+    return { ...defaultState(), ...(JSON.parse(localStorage.getItem(STORAGE_KEY)) || {}) };
+  } catch {
+    return defaultState();
+  }
+}
+
+function saveState() {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+}
+
+function getTrialStart() {
+  let started = localStorage.getItem(TRIAL_KEY);
+  if (!started) {
+    started = String(Date.now());
+    localStorage.setItem(TRIAL_KEY, started);
+  }
+  return Number(started);
+}
+
+function trialInfo() {
+  const days = Number(CONFIG.FREE_TRIAL_DAYS || 3);
+  const started = getTrialStart();
+  const expiresAt = started + days * 24 * 60 * 60 * 1000;
+  const remaining = Math.max(0, expiresAt - Date.now());
+  return {
+    days,
+    started,
+    expiresAt,
+    remaining,
+    active: remaining > 0
+  };
+}
+
+function trialLabel() {
+  if (isPaid()) return 'Lifetime';
+  const t = trialInfo();
+  if (!t.active) return 'Trial expired';
+  const hours = Math.ceil(t.remaining / (60 * 60 * 1000));
+  if (hours <= 24) return `${hours}h trial left`;
+  return `${Math.ceil(hours / 24)}d trial left`;
+}
+
+function hasTrialAccess() {
+  return trialInfo().active;
+}
+
+function isPaid() {
+  return localStorage.getItem(PAID_KEY) === 'true';
+}
+
+function chapterStartFor(level) {
+  return Math.floor((level - 1) / CONFIG.TEST_INTERVAL) * CONFIG.TEST_INTERVAL + 1;
+}
+
+function clamp(n, min, max) {
+  return Math.max(min, Math.min(max, n));
+}
+
+function levelSkill(level) {
+  return SKILLS[(level - 1) % SKILLS.length];
+}
+
+function levelTheme(level) {
+  const offset = Math.floor((level - 1) / SKILLS.length);
+  return LEVEL_THEMES[(level + offset - 1) % LEVEL_THEMES.length];
+}
+
+function difficultyLabel(level) {
+  if (level <= 50) return 'Beginner';
+  if (level <= 150) return 'Foundation+';
+  if (level <= 300) return 'Intermediate';
+  if (level <= 500) return 'Applied';
+  if (level <= 750) return 'Advanced';
+  return 'Mastery';
+}
+
+function questionCount(level) {
+  if (level % CONFIG.TEST_INTERVAL === 0) return 8;
+  return 4;
+}
+
+function getLevelTitle(level) {
+  if (level % CONFIG.TEST_INTERVAL === 0) return `Checkpoint ${level}`;
+  const skill = levelSkill(level).name;
+  const theme = levelTheme(level);
+  return `${skill}: ${theme}`;
+}
+
+function generateLesson(level) {
+  const skill = levelSkill(level);
+  const theme = levelTheme(level);
+  const difficulty = difficultyLabel(level);
+  const isTest = level % CONFIG.TEST_INTERVAL === 0;
+  if (isTest) {
+    const from = level - CONFIG.TEST_INTERVAL + 1;
+    return [
+      {
+        title: `Checkpoint test: Levels ${from}–${level}`,
+        body: `This test refreshes the previous 20 levels. You must pass to unlock Level ${level + 1}. Read questions carefully. If you fail, you will receive a recap and must retry.`,
+        code: `Rule: ${CONFIG.PASS_MARK_PERCENT}% pass mark\nWrong answers are reviewed with explanations.\nNo certificates are issued in this version.`
+      },
+      {
+        title: 'How to pass this checkpoint',
+        body: 'Focus on the reasoning, not memorising. When a question asks what code does, mentally execute it step by step. When a question asks best practice, choose the option that is safe, readable and maintainable.',
+        code: `Mental model:\n1. Identify the inputs\n2. Trace the logic\n3. Predict the output\n4. Check for edge cases`
+      },
+      {
+        title: 'Key terms before the checkpoint',
+        body: termGuide(skill.name, theme, level),
+        code: 'API = Application Programming Interface\nSQL = Structured Query Language\nDAX = Data Analysis Expressions\nDOM = Document Object Model\nJSON = JavaScript Object Notation\nHTTP = Hypertext Transfer Protocol'
+      }
+    ];
+  }
+
+  const appliedExample = exampleFor(skill.name, theme, level);
+  return [
+    {
+      title: `Level ${level}: ${skill.name}`,
+      body: `Today you learn ${theme}. Difficulty: ${difficulty}. The goal is not to click fast. The goal is to understand the concept well enough to apply it in a real project.`,
+      code: appliedExample
+    },
+    {
+      title: 'Practical rule',
+      body: practicalRule(skill.name, theme, level),
+      code: practicalCode(skill.name, theme, level)
+    },
+    {
+      title: 'Shortcuts and technical terms',
+      body: termGuide(skill.name, theme, level),
+      code: acronymCode(skill.name, theme, level)
+    }
+  ];
+}
+
+function exampleFor(skill, theme, level) {
+  const complexity = difficultyLabel(level);
+  if (skill === 'Python') return `# ${complexity} Python example\nitems = [3, 7, 2]\ntotal = sum(items)\nprint(total)`;
+  if (skill === 'JavaScript') return `// ${complexity} JavaScript example\nconst items = [3, 7, 2];\nconst total = items.reduce((a, b) => a + b, 0);\nconsole.log(total);`;
+  if (skill === 'C Programming') return `// ${complexity} C example\nint total = 0;\nfor (int i = 0; i < 3; i++) { total += numbers[i]; }`;
+  if (skill === 'SQL') return `-- ${complexity} SQL example\nSELECT department, COUNT(*) AS total\nFROM employees\nGROUP BY department;`;
+  if (skill === 'Power BI / DAX') return `-- ${complexity} DAX example\nTotal Sales = SUM(Sales[Amount])`;
+  if (skill === 'HTML / CSS') return `<section class="card">\n  <h2>${theme}</h2>\n</section>`;
+  if (skill === 'React') return `function Card({ title }) {\n  return <h2>{title}</h2>;\n}`;
+  if (skill === 'Node.js / APIs') return `app.get('/api/status', (req, res) => {\n  res.json({ ok: true });\n});`;
+  if (skill === 'Algorithms') return `function maxValue(items) {\n  let max = items[0];\n  for (const item of items) if (item > max) max = item;\n  return max;\n}`;
+  return `Plan → Build → Test → Improve\nKeep code small, readable and safe.`;
+}
+
+function practicalRule(skill, theme, level) {
+  const difficulty = difficultyLabel(level);
+  return `Practical focus: in ${skill}, ${theme} becomes useful when you can explain why it works, where it fails, and how to keep it readable. At ${difficulty} level, you must also start thinking about edge cases, naming, and maintainability.`;
+}
+
+function practicalCode(skill, theme, level) {
+  if (level <= 50) return 'Beginner task: change one value and predict the result before running it.';
+  if (level <= 150) return 'Foundation+ task: explain each line using plain English comments.';
+  if (level <= 300) return 'Intermediate task: add one edge case and handle it safely.';
+  if (level <= 500) return 'Applied task: turn the example into a small reusable function.';
+  if (level <= 750) return 'Advanced task: compare two possible solutions and pick the cleaner one.';
+  return 'Mastery task: optimise the solution without reducing readability or safety.';
+}
+
+function termGuide(skill, theme, level) {
+  const common = [
+    'API means Application Programming Interface: a controlled way for software systems to talk to each other.',
+    'UI means User Interface: the screen, button, form or page the user interacts with.',
+    'UX means User Experience: how clear, fast and comfortable the product feels to use.',
+    'DB means Database: the place where structured data is stored and queried.',
+    'CLI means Command Line Interface: controlling software by typed commands instead of clicking buttons.'
+  ];
+  const bySkill = {
+    'Python': 'pip means Python package installer. A package is reusable code you can install instead of writing everything yourself.',
+    'JavaScript': 'DOM means Document Object Model. It is the browser structure JavaScript reads and changes on a webpage.',
+    'C Programming': 'RAM means Random Access Memory. C often makes you think carefully about memory and how data is stored.',
+    'SQL': 'SQL means Structured Query Language. It is used to ask databases for data, filter it, join it and summarise it.',
+    'Power BI / DAX': 'DAX means Data Analysis Expressions. It is the formula language used for measures and calculations in Power BI.',
+    'HTML / CSS': 'HTML means HyperText Markup Language. CSS means Cascading Style Sheets. HTML structures content; CSS controls presentation.',
+    'React': 'SPA means Single Page Application. React often updates parts of the page without loading a completely new document.',
+    'Node.js / APIs': 'HTTP means Hypertext Transfer Protocol. JSON means JavaScript Object Notation. APIs often send JSON over HTTP.',
+    'Algorithms': 'Big O describes how an algorithm grows as the input becomes larger. It helps compare performance.',
+    'Software Engineering': 'CI/CD means Continuous Integration and Continuous Delivery. It automates testing and deployment.'
+  };
+  const stage = level <= 100 ? 'At this stage, learn the words and use them in simple sentences.' : level <= 500 ? 'At this stage, connect the term to real project decisions.' : 'At mastery level, explain the term, trade-offs and risks clearly.';
+  return `${bySkill[skill] || common[level % common.length]} ${common[(level + 1) % common.length]} ${stage}`;
+}
+
+function acronymCode(skill, theme, level) {
+  if (skill === 'Node.js / APIs') return 'API = Application Programming Interface\nHTTP = request/response protocol\nJSON = common data format\nEndpoint = a URL that performs one API job';
+  if (skill === 'SQL') return 'SQL = Structured Query Language\nDB = Database\nPK = Primary Key\nFK = Foreign Key';
+  if (skill === 'Power BI / DAX') return 'BI = Business Intelligence\nDAX = Data Analysis Expressions\nKPI = Key Performance Indicator\nMeasure = calculation used in visuals';
+  if (skill === 'HTML / CSS') return 'HTML = page structure\nCSS = visual styling\nDOM = browser page tree\nSEO = Search Engine Optimisation';
+  if (skill === 'React') return 'Component = reusable UI block\nProps = values passed into a component\nState = data the component remembers\nSPA = Single Page Application';
+  return 'API = Application Programming Interface\nUI = User Interface\nUX = User Experience\nCLI = Command Line Interface\nIDE = Integrated Development Environment';
+}
+
+function hashSeed(text) {
+  let h = 2166136261;
+  for (let i = 0; i < String(text).length; i++) {
+    h ^= String(text).charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return Math.abs(h >>> 0);
+}
+
+function seededRandom(seed) {
+  let value = seed >>> 0;
+  return function () {
+    value = Math.imul(1664525, value) + 1013904223;
+    return ((value >>> 0) / 4294967296);
+  };
+}
+
+function shuffledOptions(question, level, index, retry) {
+  const options = [question.correct, ...question.wrong];
+  const seed = hashSeed(`${level}-${index}-${retry}-${question.question}-${question.correct}-${Date.now()}`);
+  const random = seededRandom(seed);
+  for (let i = options.length - 1; i > 0; i--) {
+    const j = Math.floor(random() * (i + 1));
+    [options[i], options[j]] = [options[j], options[i]];
+  }
+
+  // Force the correct answer into a different-looking slot per level/question.
+  // This prevents the answer from repeatedly appearing in the same position.
+  const targetIndex = (level + index + (retry ? 2 : 0)) % options.length;
+  const currentIndex = options.indexOf(question.correct);
+  if (currentIndex !== targetIndex) {
+    [options[currentIndex], options[targetIndex]] = [options[targetIndex], options[currentIndex]];
+  }
+  return options;
+}
+
+function scenarioFor(level) {
+  const scenarios = [
+    'a warehouse stock dashboard',
+    'a learner progress tracker',
+    'a checkout payment screen',
+    'a Power BI performance report',
+    'a job application generator',
+    'a booking form',
+    'an API status page',
+    'a team productivity table',
+    'a small calculator app',
+    'a customer support inbox',
+    'an inventory alert system',
+    'a login form',
+    'a delivery route list',
+    'a sales summary page',
+    'a code review checklist',
+    'a study reminder app'
+  ];
+  return scenarios[(level - 1) % scenarios.length];
+}
+
+function questionBlueprint(level, index, retry = false) {
+  const skill = levelSkill(level);
+  const theme = levelTheme(level);
+  const diff = difficultyLabel(level);
+  const scenario = scenarioFor(level + index + (retry ? 9 : 0));
+  const topic = `${skill.name} / ${theme}`;
+  const n = level + index + 3;
+  const templateCount = 30;
+  const type = (level * 5 + index * 7 + (retry ? 13 : 0)) % templateCount;
+  const retryTone = retry ? 'This is a retry version, so read carefully. ' : '';
+
+  const common = { topic };
+
+  switch (type) {
+    case 0:
+      return { ...common,
+        question: `${retryTone}In ${scenario}, you need a value that may change later. What is the best reason to store it in a variable in ${skill.name}?`,
+        correct: 'So the value has a clear name and can be reused or changed safely.',
+        wrong: ['So the value is hidden from every other line of code.', 'So future changes are made directly inside the output only.', 'So testing can be delayed until the final project stage.'],
+        explain: 'Variables give meaning to values. They make code easier to update, read and debug.'
+      };
+    case 1:
+      return { ...common,
+        question: `${retryTone}A user enters data into ${scenario}. What should your ${skill.name} code do before trusting that input?`,
+        correct: 'Validate the input and handle unexpected values.',
+        wrong: ['Trust the input first and only check it if a bug appears later.', 'Replace unclear input with a default value without telling the user.', 'Show a generic failure but keep no useful debugging detail.'],
+        explain: 'Real users make mistakes. Validation prevents unsafe, broken or misleading results.'
+      };
+    case 2:
+      return { ...common,
+        question: `${retryTone}You see repeated logic in ${scenario}. What is usually the cleanest improvement?`,
+        correct: 'Move the repeated logic into a reusable function or component.',
+        wrong: ['Copy it once more now and promise to clean it later.', 'Rename nearby variables without changing the repeated logic.', 'Leave the feature working but difficult to update.'],
+        explain: 'Repeated logic is harder to maintain. Reusable functions/components reduce bugs and duplication.'
+      };
+    case 3:
+      return { ...common,
+        question: `${retryTone}A loop processes ${n} records in ${scenario}. What must be true to avoid an infinite loop?`,
+        correct: 'The stopping condition must eventually become false or exit safely.',
+        wrong: ['The loop stops because the computer eventually gets bored.', 'The loop stops when the variable name sounds correct.', 'The loop stops when the page design is finished.'],
+        explain: 'Loops stop because of logic. If the condition never changes, the loop can run forever.'
+      };
+    case 4:
+      return { ...common,
+        question: `${retryTone}At ${diff} level, what makes code easier to review by another programmer?`,
+        correct: 'Small focused blocks, clear names and predictable structure.',
+        wrong: ['Long code in one place because it feels faster to write initially.', 'Very compact code that saves lines but hides the intent.', 'Detailed comments while the actual logic stays confusing.'],
+        explain: 'Professional code is not just working code. It must also be readable, reviewable and maintainable.'
+      };
+    case 5:
+      return { ...common,
+        question: `${retryTone}A result in ${scenario} is wrong. What is the strongest debugging first step?`,
+        correct: 'Reproduce the issue and trace the values step by step.',
+        wrong: ['Change several likely areas and check if the symptom disappears.', 'Adjust values visually until the result looks acceptable.', 'Treat the bug as low priority because the main page loads.'],
+        explain: 'Debugging needs evidence. Reproduce, inspect, isolate, then fix.'
+      };
+    case 6:
+      return { ...common,
+        question: `${retryTone}A function receives ${n} and returns ${n * 2}. What is the likely rule?`,
+        correct: 'It multiplies the input by 2.',
+        wrong: ['It stores the input but returns a fixed backup value.', 'It formats the input visually rather than changing the number.', 'It sends the input somewhere without changing the value.'],
+        explain: `Because ${n} becomes ${n * 2}, the pattern is input × 2.`
+      };
+    case 7:
+      return { ...common,
+        question: `${retryTone}When building ${scenario}, why should you test a small piece before adding more features?`,
+        correct: 'It helps catch problems early before the project becomes harder to debug.',
+        wrong: ['It proves the business model before the feature is complete.', 'It makes understanding optional as long as the test passes once.', 'It reduces syntax errors without checking the actual logic.'],
+        explain: 'Small tests reduce risk. Fixing a bug is easier when the changed area is small.'
+      };
+    case 8:
+      return { ...common,
+        question: `${retryTone}Which option best shows real understanding of ${theme} in ${skill.name}?`,
+        correct: 'Being able to explain, change and debug the idea in a small project.',
+        wrong: ['Recognising the answer from where it appeared last time.', 'Answering quickly because the wording looks familiar.', 'Copying a working snippet and changing names only.'],
+        explain: 'Understanding means you can apply the idea, not just recognise one answer.'
+      };
+    case 9:
+      return { ...common,
+        question: `${retryTone}In ${scenario}, one function does five unrelated jobs. What problem does this create?`,
+        correct: 'It becomes harder to test, reuse and safely change.',
+        wrong: ['It may feel organised because everything is in one location.', 'It reduces visible files but not the actual complexity.', 'It makes the input form look cleaner without validation.'],
+        explain: 'Functions should usually do one clear job. Mixed responsibilities create fragile code.'
+      };
+    case 10:
+      return { ...common,
+        question: `${retryTone}A developer adds a comment, but the code is still confusing. What is the better fix?`,
+        correct: 'Improve the code structure and names, then use comments only where helpful.',
+        wrong: ['Add more comments while leaving unclear names unchanged.', 'Use shorter names to make the file look cleaner.', 'Explain the mistake in comments instead of changing the code.'],
+        explain: 'Comments help, but they should not compensate for unreadable structure and poor naming.'
+      };
+    case 11:
+      return { ...common,
+        question: `${retryTone}You need to show a list of items in ${scenario}. Which approach is usually best?`,
+        correct: 'Store the items in a list/array and render or process them consistently.',
+        wrong: ['Create several separate variables and add more as the list grows.', 'Assume the list will never grow beyond the first version.', 'Hard-code the first few values because it works in the demo.'],
+        explain: 'Lists/arrays are made for groups of related values. They scale better than many unrelated variables.'
+      };
+    case 12:
+      return { ...common,
+        question: `${retryTone}A user action should trigger one clear result in ${scenario}. What should your event logic avoid?`,
+        correct: 'Doing several hidden unrelated actions from one click.',
+        wrong: ['Using a named function that describes the click result.', 'Validating the input before running the action.', 'Telling the user what happened after the click.'],
+        explain: 'Event handlers should be predictable. Hidden side effects make bugs difficult to find.'
+      };
+    case 13:
+      return { ...common,
+        question: `${retryTone}In ${scenario}, which answer is closest to “edge case”?`,
+        correct: 'A rare but possible input or situation that the code still must handle.',
+        wrong: ['A styling detail that only affects the visual design.', 'The most common case that the app already handles.', 'A naming decision that does not affect input behaviour.'],
+        explain: 'Edge cases are unusual but valid possibilities. Good software handles them deliberately.'
+      };
+    case 14:
+      return { ...common,
+        question: `${retryTone}In ${scenario}, a teammate says “the API returned JSON over HTTP”. What does that mean?`,
+        correct: 'A software interface sent structured data through a web request.',
+        wrong: ['A database drew a chart directly in the browser without code.', 'A CSS file stored the user password as a visual style.', 'A loop changed the logo colour and called it deployment.'],
+        explain: 'API means Application Programming Interface, JSON is a structured data format, and HTTP is the web request/response protocol.'
+      };
+    case 15:
+      return { ...common,
+        question: `${retryTone}A small change breaks ${scenario}. What habit reduces this risk over time?`,
+        correct: 'Change one thing at a time and test after each important change.',
+        wrong: ['Change several areas at once if they all seem related.', 'Wait for the full feature before checking smaller parts.', 'Fix the visual symptom before checking the data path.'],
+        explain: 'Small controlled changes make it easier to identify the exact cause of a problem.'
+      };
+    case 16:
+      return { ...common,
+        question: `${retryTone}Which answer best describes a useful error message for ${scenario}?`,
+        correct: 'It tells the user or developer what went wrong and what to check next.',
+        wrong: ['It only shows a blank result and expects the user to infer it.', 'It says the input is wrong without saying what to check.', 'It fails silently to avoid interrupting the user.'],
+        explain: 'Useful errors shorten debugging time and help users recover from mistakes.'
+      };
+    case 17:
+      return { ...common,
+        question: `${retryTone}You are comparing two solutions for ${scenario}. Which one is usually better?`,
+        correct: 'The one that is correct, simple, readable and easy to test.',
+        wrong: ['The solution with more lines because it looks more advanced.', 'The clever-looking solution that only the author understands.', 'The shorter solution that only works when everything is perfect.'],
+        explain: 'Professional solutions balance correctness, clarity and maintainability.'
+      };
+    case 18:
+      return { ...common,
+        question: `${retryTone}What does “state” usually mean when building an interactive app like ${scenario}?`,
+        correct: 'The current data the app remembers and uses to decide what to show.',
+        wrong: ['A visual setting that never affects behaviour or data.', 'A secret value stored somewhere in the project.', 'A fixed asset that the app displays but never updates.'],
+        explain: 'State is remembered app data: current level, score, selected answer, login status, and similar values.'
+      };
+    case 19:
+      return { ...common,
+        question: `${retryTone}A learner rushes and clicks without reading. What is the programming risk being shown?`,
+        correct: 'They may pass visually but fail to build real reasoning skills.',
+        wrong: ['They may complete the screen but not improve their reasoning.', 'Fast clicking helps only if the question is already understood.', 'The test still matters because it checks the thought process.'],
+        explain: 'Programming skill depends on reasoning. Random clicking does not build reliable problem-solving.'
+      };
+    case 20:
+      return { ...common,
+        question: `${retryTone}In ${scenario}, data comes from an API. What should the app expect?`,
+        correct: 'The request may fail, be slow, or return unexpected data.',
+        wrong: ['The API should be treated as reliable during early testing only.', 'The browser can infer the server response from the page layout.', 'Validation should be skipped because the data comes from software.'],
+        explain: 'Real APIs can fail or return surprises. Strong code handles loading, errors and validation.'
+      };
+    case 21:
+      return { ...common,
+        question: `${retryTone}Which practice helps when learning several languages like Python, JavaScript, C, SQL and DAX?`,
+        correct: 'Learn transferable concepts such as variables, conditions, loops and data flow.',
+        wrong: ['Focus on the layout of answers because patterns are quicker.', 'Keep each language completely separate in your mind.', 'Start with large projects and learn the basics later if needed.'],
+        explain: 'Core concepts transfer between languages. Syntax changes, but reasoning patterns repeat.'
+      };
+    case 22:
+      return { ...common,
+        question: `${retryTone}What is the best reason to review wrong answers after a failed level?`,
+        correct: 'To identify the exact misconception and correct it before moving forward.',
+        wrong: ['To remember which option looked correct last time.', 'To move faster by avoiding the explanation section.', 'To avoid seeing mistakes that slow down progress.'],
+        explain: 'Review should fix thinking, not train answer-position memory.'
+      };
+    case 23:
+      return { ...common,
+        question: `${retryTone}In ${scenario}, the code works for three records but fails for zero records. What is the best diagnosis?`,
+        correct: 'The code likely ignores an edge case and needs a safe empty-state path.',
+        wrong: ['The code is correct because the main example works.', 'The visual layout is probably causing the data failure.', 'The variable names need to be shorter before testing again.'],
+        explain: 'A solution must handle normal cases and edge cases. Empty inputs are common real-world edge cases.'
+      };
+    case 24:
+      return { ...common,
+        question: `${retryTone}A junior developer changes a function and two unrelated screens break. What does that suggest?`,
+        correct: 'The function may have hidden responsibilities or side effects.',
+        wrong: ['The screens are too colourful and distract from logic.', 'The app needs more comments before any testing.', 'The change is safe if the original function name stayed the same.'],
+        explain: 'Hidden side effects create fragile systems. Strong code makes dependencies clear.'
+      };
+    case 25:
+      return { ...common,
+        question: `${retryTone}You read “CLI command failed because the path is wrong”. What should you check first?`,
+        correct: 'Whether the terminal is in the folder that contains the needed file.',
+        wrong: ['Whether the internet speed changed the command syntax.', 'Whether the filename should be typed without its extension.', 'Whether the app should be paid before the command can run.'],
+        explain: 'CLI means Command Line Interface. Many command errors happen because the current folder is not the expected one.'
+      };
+    case 26:
+      return { ...common,
+        question: `${retryTone}In ${scenario}, a Power BI KPI changes when a filter is applied. Which concept matters most?`,
+        correct: 'Filter context controls how the measure is calculated.',
+        wrong: ['The report theme changes the DAX calculation.', 'The table name decides the visual colour automatically.', 'The browser cache selects the KPI result.'],
+        explain: 'In DAX, context affects calculation. This is critical for Power BI measures.'
+      };
+    case 27:
+      return { ...common,
+        question: `${retryTone}A JavaScript fetch request returns JSON. What is the safest next step before using it?`,
+        correct: 'Check the response status and validate the data shape.',
+        wrong: ['Render it immediately because JSON is always safe.', 'Convert it to CSS so the browser can trust it.', 'Ignore missing fields because APIs always return the same result.'],
+        explain: 'APIs can fail or change. Strong apps check status, parse carefully and validate expected fields.'
+      };
+    case 28:
+      return { ...common,
+        question: `${retryTone}A C program writes outside the size of an array. What is the main risk?`,
+        correct: 'Memory can be corrupted and the program may behave unpredictably.',
+        wrong: ['The array becomes a database table automatically.', 'The compiler fixes the index at runtime every time.', 'The UI slows down but the data remains guaranteed safe.'],
+        explain: 'C requires careful memory thinking. Out-of-bounds access is dangerous and can corrupt data.'
+      };
+    case 29:
+      return { ...common,
+        question: `${retryTone}At higher levels, why is random guessing a bad strategy in SC?`,
+        correct: 'Wrong answers reduce XP and failed levels block progression until retried properly.',
+        wrong: ['Guessing unlocks later content if done quickly enough.', 'The system rewards speed more than reasoning.', 'The correct answer is always the longest option.'],
+        explain: 'The system is designed to reward understanding. Guessing can cost XP and delay progression.'
+      };
+    default:
+      return { ...common,
+        question: `${retryTone}At Level ${level}, what is the best sign you are ready for the next level?`,
+        correct: 'You can explain the lesson, answer most questions correctly and apply the idea.',
+        wrong: ['You recognise one repeated wording pattern from earlier levels.', 'You moved through the cards quickly and guessed confidently.', 'You remember the key phrase but cannot apply it in a new case.'],
+        explain: 'Progress should require understanding, not luck. A 3/4 pass mark allows one mistake but still demands competence.'
+      };
+  }
+}
+
+function strengthenDistractors(q, level, index) {
+  // Make distractors believable and avoid the common pattern where the longest answer is correct.
+  // As levels rise, the options become closer in meaning and require more reasoning.
+  const seriousReplacements = [
+    'It may work in one demo but fail when the input changes.',
+    'It improves the interface but does not fix the underlying logic.',
+    'It handles the common case but ignores edge cases and error paths.',
+    'It makes the code shorter but less clear to review or maintain.',
+    'It delays validation until after the result has already been used.',
+    'It solves part of the problem while leaving the risky part unchanged.'
+  ];
+
+  const sillyPatterns = [/computer eventually gets bored/i, /variable name sounds correct/i, /page design is finished/i, /logo colour/i, /CSS file stored the user password/i, /answer from where it appeared/i, /clicking/i];
+  let wrong = q.wrong.map((item, i) => {
+    if (sillyPatterns.some(rx => rx.test(item))) {
+      return seriousReplacements[(level + index + i) % seriousReplacements.length];
+    }
+    return item;
+  });
+
+  // At higher levels, make answers more nuanced.
+  if (level > 80) {
+    wrong = wrong.map((item, i) => {
+      const addon = [
+        ' when the first version is small.',
+        ' if no user has reported it yet.',
+        ' when speed feels more important than reliability.',
+        ' if the output looks correct in one example.'
+      ][(level + i) % 4];
+      return item.length < q.correct.length - 15 ? item + addon : item;
+    });
+  }
+
+  // If the correct answer is much longer than every wrong option, add realistic detail to one or two wrong answers.
+  const longestWrong = Math.max(...wrong.map(w => w.length));
+  if (q.correct.length > longestWrong + 22) {
+    wrong = wrong.map((item, i) => i < 2 ? item + ' while keeping the existing behaviour predictable.' : item);
+  }
+
+  // Sometimes shorten the correct wording without changing the idea.
+  let correct = q.correct;
+  const shortCorrect = [
+    'Validate first and handle unexpected values.',
+    'Use a reusable function or component.',
+    'Trace values step by step.',
+    'Keep it simple, readable and testable.',
+    'Handle loading, errors and validation.'
+  ];
+  if (level > 40 && q.correct.length > 70 && (level + index) % 5 === 0) {
+    correct = shortCorrect[(level + index) % shortCorrect.length];
+  }
+
+  return { ...q, correct, wrong };
+}
+
+function makeQuestion(level, index, retry = false) {
+  let q = questionBlueprint(level, index, retry);
+  q = strengthenDistractors(q, level, index);
+  return { ...q, options: shuffledOptions(q, level, index, retry) };
+}
+function generateQuestions(level, retry = false) {
+  const count = questionCount(level);
+  const isCheckpoint = level % CONFIG.TEST_INTERVAL === 0;
+  if (!isCheckpoint) {
+    // Normal levels now ask four different questions about the same level topic.
+    return Array.from({ length: count }, (_, i) => makeQuestion(level, i, retry));
+  }
+
+  // Checkpoints still refresh the previous 20 levels, but each question uses a different source level.
+  const start = level - CONFIG.TEST_INTERVAL + 1;
+  return Array.from({ length: count }, (_, i) => makeQuestion(start + (i % CONFIG.TEST_INTERVAL), i, retry));
+}
+
+
+function canAccess(level) {
+  if (level <= CONFIG.FREE_LEVELS) return true;
+  return isPaid() || hasTrialAccess();
+}
+
+function isUnlocked(level) {
+  return level <= state.unlockedLevel;
+}
+
+function renderAll() {
+  renderStats();
+  renderPath();
+  renderDashboard();
+  document.getElementById('paymentLink').href = CONFIG.STRIPE_PAYMENT_LINK || '#pricing';
+  const trialBadge = document.getElementById('trialBadge');
+  if (trialBadge) trialBadge.textContent = trialLabel();
+  const trialInfoBox = document.getElementById('trialInfoBox');
+  if (trialInfoBox) trialInfoBox.textContent = isPaid() ? 'Lifetime access active.' : (hasTrialAccess() ? `Free trial active. ${trialLabel()} before payment is required.` : 'Free trial expired. Unlock lifetime access to continue.');
+}
+
+function renderStats() {
+  document.getElementById('xpTotal').textContent = state.xp;
+  document.getElementById('currentLevelStat').textContent = state.currentLevel;
+  document.getElementById('streakStat').textContent = state.streak;
+  document.getElementById('paidStat').textContent = trialLabel();
+}
+
+function renderPath() {
+  const path = document.getElementById('levelPath');
+  path.innerHTML = '';
+  const end = Math.min(visibleChapterStart + CONFIG.TEST_INTERVAL - 1, CONFIG.TOTAL_LEVELS);
+  document.getElementById('chapterLabel').textContent = `Levels ${visibleChapterStart}–${end}`;
+  document.getElementById('chapterTitle').textContent = `Levels ${visibleChapterStart}–${end}`;
+
+  for (let level = visibleChapterStart; level <= end; level++) {
+    const btn = document.createElement('button');
+    btn.className = 'level-node';
+    if (level === state.currentLevel) btn.classList.add('current');
+    if (state.completedLevels.includes(level)) btn.classList.add('done');
+    if (!isUnlocked(level) || !canAccess(level)) btn.classList.add('locked');
+    if (level % CONFIG.TEST_INTERVAL === 0) btn.classList.add('test');
+
+    const lockedLabel = !canAccess(level) ? 'Trial ended' : (!isUnlocked(level) ? 'Locked' : (level % CONFIG.TEST_INTERVAL === 0 ? 'Test' : difficultyLabel(level))); 
+    btn.innerHTML = `
+      <span class="level-number">${level}</span>
+      <span class="level-title">${lockedLabel}</span>
+    `;
+    btn.addEventListener('click', () => openLevel(level));
+    path.appendChild(btn);
+  }
+}
+
+function openLevel(level) {
+  activeLevel = level;
+  if (!canAccess(level)) {
+    showLessonView();
+    renderPaywall(level);
+    return;
+  }
+  if (!isUnlocked(level)) {
+    showLessonView();
+    renderLocked(level);
+    return;
+  }
+  lessonStage = 'lesson';
+  lessonCardIndex = 0;
+  questionIndex = 0;
+  selectedAnswer = null;
+  currentQuestions = generateQuestions(level);
+  testResults = [];
+  showLessonView();
+  renderLessonCard();
+}
+
+function showLessonView() {
+  mode = 'lesson';
+  document.getElementById('pathView').classList.add('hidden');
+  document.getElementById('statsView').classList.add('hidden');
+  document.getElementById('lessonView').classList.remove('hidden');
+}
+
+function showPathView() {
+  mode = 'path';
+  document.getElementById('lessonView').classList.add('hidden');
+  document.getElementById('statsView').classList.add('hidden');
+  document.getElementById('pathView').classList.remove('hidden');
+  setActiveNav('navPath');
+  renderAll();
+}
+
+function renderPaywall(level) {
+  const content = document.getElementById('lessonContent');
+  content.innerHTML = `
+    <div class="paywall">
+      <p class="eyebrow">Lifetime access required</p>
+      <h2>Level ${level} is locked</h2>
+      <p>Your ${CONFIG.FREE_TRIAL_DAYS}-day trial has expired. To continue your Level 1–${CONFIG.TOTAL_LEVELS} mastery path, unlock lifetime access.</p>
+      <div class="action-row" style="justify-content:center">
+        <a class="primary-link" href="${CONFIG.STRIPE_PAYMENT_LINK || '#pricing'}">Unlock lifetime access</a>
+        <button class="secondary-btn" onclick="showPathView()">Back to path</button>
+      </div>
+      <p style="color:var(--muted);margin-top:18px">Static MVP note: set your Stripe payment link success URL to <strong>success.html</strong>. That page unlocks this browser after payment.</p>
+    </div>
+  `;
+}
+
+function renderLocked(level) {
+  const content = document.getElementById('lessonContent');
+  content.innerHTML = `
+    <div class="paywall">
+      <p class="eyebrow">One-by-one learning</p>
+      <h2>Level ${level} is not unlocked yet</h2>
+      <p>You must complete Level ${level - 1} first. You need 3 out of 4 correct to pass normal levels. If you score 2/4 or lower, you will review your mistakes and retry with reworded questions.</p>
+      <button class="primary-btn" onclick="openLevel(${state.unlockedLevel})">Continue Level ${state.unlockedLevel}</button>
+    </div>
+  `;
+}
+
+function renderLessonCard() {
+  const skill = levelSkill(activeLevel);
+  document.getElementById('lessonSkill').textContent = `${skill.icon} ${activeLevel % CONFIG.TEST_INTERVAL === 0 ? 'Checkpoint Test' : skill.name}`;
+  const lesson = generateLesson(activeLevel);
+  const card = lesson[lessonCardIndex];
+  const content = document.getElementById('lessonContent');
+  content.innerHTML = `
+    <div class="lesson-card">
+      <p class="eyebrow">Teach first • Level ${activeLevel}</p>
+      <h2>${card.title}</h2>
+      <p class="lesson-body">${card.body}</p>
+      ${card.code ? `<pre class="code-box">${escapeHtml(card.code)}</pre>` : ''}
+      <div class="action-row">
+        ${lessonCardIndex > 0 ? '<button class="secondary-btn" id="prevLessonCard">Back</button>' : ''}
+        <button class="primary-btn" id="nextLessonCard">${lessonCardIndex === lesson.length - 1 ? 'Start Q&A' : 'Next lesson card'}</button>
+      </div>
+    </div>
+  `;
+
+  const prev = document.getElementById('prevLessonCard');
+  if (prev) prev.addEventListener('click', () => { lessonCardIndex--; renderLessonCard(); });
+  document.getElementById('nextLessonCard').addEventListener('click', () => {
+    if (lessonCardIndex < lesson.length - 1) {
+      lessonCardIndex++;
+      renderLessonCard();
+    } else {
+      lessonStage = 'quiz';
+      questionIndex = 0;
+      selectedAnswer = null;
+      renderQuestion();
+    }
+  });
+}
+
+function renderQuestion() {
+  const q = currentQuestions[questionIndex];
+  const content = document.getElementById('lessonContent');
+  const isTest = activeLevel % CONFIG.TEST_INTERVAL === 0;
+  content.innerHTML = `
+    <div class="question-card">
+      <div class="question-meta">
+        <span>${isTest ? 'Checkpoint test' : 'Level quiz'} • Question ${questionIndex + 1}/${currentQuestions.length}</span>
+        <span>+${isTest ? 25 : 15} XP correct • -${CONFIG.WRONG_ANSWER_XP_PENALTY || 10} XP wrong</span>
+      </div>
+      <h2>${q.question}</h2>
+      <div class="options" id="options"></div>
+      <div id="feedbackBox"></div>
+    </div>
+  `;
+  const options = document.getElementById('options');
+  q.options.forEach((option) => {
+    const btn = document.createElement('button');
+    btn.className = 'option-btn';
+    btn.textContent = option;
+    btn.addEventListener('click', () => handleAnswer(option));
+    options.appendChild(btn);
+  });
+}
+
+function handleAnswer(answer) {
+  if (selectedAnswer !== null) return;
+  selectedAnswer = answer;
+  const q = currentQuestions[questionIndex];
+  const buttons = [...document.querySelectorAll('.option-btn')];
+  const correct = answer === q.correct;
+
+  buttons.forEach((btn) => {
+    btn.disabled = true;
+    if (btn.textContent === q.correct) btn.classList.add('correct');
+    if (btn.textContent === answer && !correct) btn.classList.add('wrong');
+  });
+
+  testResults.push({ question: q.question, correct, topic: q.topic, chosen: answer, expected: q.correct, explain: q.explain });
+
+  const feedback = document.getElementById('feedbackBox');
+  if (correct) {
+    const points = activeLevel % CONFIG.TEST_INTERVAL === 0 ? 25 : 15;
+    state.xp += points;
+    state.streak += 1;
+    saveState();
+    renderStats();
+    feedback.innerHTML = `
+      <div class="feedback pass">
+        <strong>Correct.</strong> ${q.explain}
+      </div>
+      <div class="action-row">
+        <button class="primary-btn" id="continueQuestion">${questionIndex === currentQuestions.length - 1 ? 'See result' : 'Next question'}</button>
+      </div>
+    `;
+  } else {
+    state.streak = 0;
+    state.xp = Math.max(0, state.xp - (CONFIG.WRONG_ANSWER_XP_PENALTY || 10));
+    state.failedTopics.push(q.topic);
+    state.attempts[activeLevel] = (state.attempts[activeLevel] || 0) + 1;
+    saveState();
+    renderStats();
+    feedback.innerHTML = `
+      <div class="feedback fail">
+        <strong>Not correct.</strong><br>
+        You chose: <strong>${escapeHtml(answer)}</strong><br>
+        Correct answer: <strong>${escapeHtml(q.correct)}</strong><br><br>
+        Why: ${q.explain}<br><br>
+        You lost ${CONFIG.WRONG_ANSWER_XP_PENALTY || 10} XP for rushing. Keep going. You need ${passNeeded()} correct answers to pass this level.
+      </div>
+      <div class="action-row">
+        <button class="primary-btn" id="continueQuestion">${questionIndex === currentQuestions.length - 1 ? 'See result' : 'Next question'}</button>
+      </div>
+    `;
+  }
+
+  document.getElementById('continueQuestion').addEventListener('click', () => {
+    if (questionIndex < currentQuestions.length - 1) {
+      questionIndex++;
+      selectedAnswer = null;
+      renderQuestion();
+    } else {
+      finishAttempt();
+    }
+  });
+}
+
+function passNeeded() {
+  return Math.ceil(currentQuestions.length * (CONFIG.PASS_MARK_PERCENT / 100));
+}
+
+function finishAttempt() {
+  const correctCount = testResults.filter(r => r.correct).length;
+  const total = currentQuestions.length;
+  const percent = Math.round((correctCount / total) * 100);
+  const needed = passNeeded();
+
+  if (correctCount >= needed) {
+    completeLevel(correctCount, total, percent);
+  } else {
+    renderRetryRecap(correctCount, total, percent);
+  }
+}
+
+function renderRetryRecap(correctCount, total, percent) {
+  const isTest = activeLevel % CONFIG.TEST_INTERVAL === 0;
+  const wrong = testResults.filter(r => !r.correct);
+  const rows = wrong.map((r, idx) => `
+    <li>
+      <strong>${idx + 1}. ${escapeHtml(r.topic)}</strong><br>
+      Question: ${escapeHtml(r.question)}<br>
+      Your answer: <span style="color:#991b1b">${escapeHtml(r.chosen)}</span><br>
+      Correct idea: <span style="color:#166534">${escapeHtml(r.expected)}</span><br>
+      Why: ${escapeHtml(r.explain)}
+    </li>
+  `).join('');
+
+  const content = document.getElementById('lessonContent');
+  content.innerHTML = `
+    <div class="feedback fail">
+      <h2>${isTest ? 'Checkpoint not passed yet' : 'Level not passed yet'}</h2>
+      <p>You scored ${correctCount}/${total} (${percent}%). You need at least ${passNeeded()}/${total} correct to pass.</p>
+      <p>Review the weak parts below. Then you will get new questions written differently, so you cannot just memorise the visible answer.</p>
+      <ol>${rows}</ol>
+    </div>
+    <div class="action-row">
+      <button class="primary-btn" id="retryWeakQuestions">Retry with new questions</button>
+      <button class="secondary-btn" id="backToLesson">Review lesson first</button>
+    </div>
+  `;
+  document.getElementById('retryWeakQuestions').addEventListener('click', () => retryQuiz(activeLevel));
+  document.getElementById('backToLesson').addEventListener('click', () => restartLevel(activeLevel));
+}
+
+function retryQuiz(level) {
+  activeLevel = level;
+  lessonStage = 'quiz';
+  questionIndex = 0;
+  selectedAnswer = null;
+  currentQuestions = generateQuestions(level, true);
+  testResults = [];
+  renderQuestion();
+}
+
+function restartLevel(level) {
+  activeLevel = level;
+  lessonStage = 'lesson';
+  lessonCardIndex = 0;
+  questionIndex = 0;
+  selectedAnswer = null;
+  currentQuestions = generateQuestions(level, false);
+  testResults = [];
+  renderLessonCard();
+}
+
+function completeLevel(correctCount, total, percent) {
+  const isTest = activeLevel % CONFIG.TEST_INTERVAL === 0;
+
+  if (!state.completedLevels.includes(activeLevel)) state.completedLevels.push(activeLevel);
+  if (activeLevel >= state.unlockedLevel && activeLevel < CONFIG.TOTAL_LEVELS) {
+    state.unlockedLevel = activeLevel + 1;
+  }
+  state.currentLevel = Math.min(activeLevel + 1, CONFIG.TOTAL_LEVELS);
+  if (isTest && !state.testsPassed.includes(activeLevel)) state.testsPassed.push(activeLevel);
+  saveState();
+  visibleChapterStart = chapterStartFor(state.currentLevel);
+
+  const content = document.getElementById('lessonContent');
+  content.innerHTML = `
+    <div class="feedback pass">
+      <h2>${isTest ? 'Checkpoint passed' : 'Level passed'}</h2>
+      <p>You scored ${correctCount}/${total} (${percent}%). Pass rule: 3/4 or better. Random clicking is risky because wrong answers reduce XP and failed levels do not unlock the next level.</p>
+      <p>You unlocked Level ${state.currentLevel}. No certificate is issued. This platform focuses on learning progress, XP and checkpoint tests only.</p>
+      <p><strong>XP:</strong> ${state.xp} • <strong>Streak:</strong> ${state.streak}</p>
+    </div>
+    <div class="action-row">
+      <button class="primary-btn" id="goNextLevel">Continue to Level ${state.currentLevel}</button>
+      <button class="secondary-btn" id="goPath">Back to path</button>
+    </div>
+  `;
+  document.getElementById('goNextLevel').addEventListener('click', () => openLevel(state.currentLevel));
+  document.getElementById('goPath').addEventListener('click', showPathView);
+  renderAll();
+}
+
+function renderDashboard() {
+  const completed = state.completedLevels.length;
+  const tests = state.testsPassed.length;
+  const weak = mostCommon(state.failedTopics).slice(0, 5);
+  document.getElementById('progressDashboard').innerHTML = `
+    <div class="metric-card"><strong>${completed}</strong><span>Levels completed</span></div>
+    <div class="metric-card"><strong>${tests}</strong><span>Checkpoint tests passed</span></div>
+    <div class="metric-card"><strong>${state.xp}</strong><span>Total XP earned</span></div>
+    <div class="metric-card"><strong>${state.unlockedLevel}</strong><span>Highest unlocked level</span></div>
+    <div class="metric-card" style="grid-column:1/-1">
+      <h3>Weak areas to revise</h3>
+      ${weak.length ? `<ul>${weak.map(x => `<li>${escapeHtml(x.name)} — missed ${x.count} time(s)</li>`).join('')}</ul>` : '<p>No weak areas recorded yet. Keep going.</p>'}
+    </div>
+  `;
+}
+
+function mostCommon(items) {
+  const map = new Map();
+  items.forEach(item => map.set(item, (map.get(item) || 0) + 1));
+  return [...map.entries()].map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count);
+}
+
+function setActiveNav(id) {
+  document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+}
+
+function escapeHtml(str) {
+  return String(str).replace(/[&<>'"]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[ch]));
+}
+
+// Events
+
+document.getElementById('startCurrentBtn').addEventListener('click', () => {
+  visibleChapterStart = chapterStartFor(state.currentLevel);
+  openLevel(state.currentLevel);
+});
+
+document.getElementById('resetProgressBtn').addEventListener('click', () => {
+  if (confirm('Reset all local progress for this browser?')) {
+    localStorage.removeItem(STORAGE_KEY);
+    location.reload();
+  }
+});
+
+document.getElementById('backToPath').addEventListener('click', showPathView);
+
+document.getElementById('navPath').addEventListener('click', showPathView);
+
+document.getElementById('navStats').addEventListener('click', () => {
+  document.getElementById('pathView').classList.add('hidden');
+  document.getElementById('lessonView').classList.add('hidden');
+  document.getElementById('statsView').classList.remove('hidden');
+  setActiveNav('navStats');
+  renderDashboard();
+});
+
+document.getElementById('navPricing').addEventListener('click', () => {
+  document.getElementById('pricingBox').scrollIntoView({ behavior: 'smooth', block: 'center' });
+  setActiveNav('navPricing');
+});
+
+document.getElementById('prevChapter').addEventListener('click', () => {
+  visibleChapterStart = clamp(visibleChapterStart - CONFIG.TEST_INTERVAL, 1, CONFIG.TOTAL_LEVELS);
+  renderPath();
+});
+
+document.getElementById('nextChapter').addEventListener('click', () => {
+  const nextStart = visibleChapterStart + CONFIG.TEST_INTERVAL;
+  if (nextStart <= Math.min(CONFIG.TOTAL_LEVELS, state.unlockedLevel + CONFIG.TEST_INTERVAL)) {
+    visibleChapterStart = nextStart;
+  } else {
+    alert('Complete more levels to reveal later chapters.');
+  }
+  renderPath();
+});
+
+// Expose functions for inline restart buttons only.
+window.openLevel = openLevel;
+window.showPathView = showPathView;
+window.restartLevel = restartLevel;
+
+renderAll();

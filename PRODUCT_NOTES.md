@@ -1,0 +1,11 @@
+window.SC_CONFIG = {
+  BRAND_NAME: "SC System Control Academy",
+  MASCOT_NAME: "Scout",
+  FREE_LEVELS: 0,
+  FREE_TRIAL_DAYS: 3,
+  TOTAL_LEVELS: 1000,
+  TEST_INTERVAL: 20,
+  PASS_MARK_PERCENT: 75,
+  WRONG_ANSWER_XP_PENALTY: 10,
+  STRIPE_PAYMENT_LINK: "https://buy.stripe.com/test_8x2aEXgPceOs2fpaMr4wM00"
+};

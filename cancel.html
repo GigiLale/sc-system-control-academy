@@ -1,0 +1,13 @@
+# SC System Control Academy — Product Notes
+
+## Business model
+The platform uses a 3-day free trial and one-time lifetime access through Stripe Payment Link.
+
+## Learning model
+Learners work through 1000 levels. Every level gives a practical lesson first, then 4-option questions. A score of 3/4 or 4/4 passes the level. A score of 2/4 or lower triggers a recap and reworded retry.
+
+## Anti-random-clicking logic
+Wrong answers reduce XP and reset the streak. Later levels use more scenario-based and closer distractor answers.
+
+## Current technical limitation
+This is a static browser-based MVP. It does not verify Stripe payment server-side. A production version needs accounts, database, Stripe webhook verification, and server-side access control.
